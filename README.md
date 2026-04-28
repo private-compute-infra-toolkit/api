@@ -1,7 +1,7 @@
 # PCIT API
 
 This repository contains the API definitions in Protocol Buffers (proto) format for the Private
-Compute Infrastructure Toolikt services.
+Compute Infrastructure Toolkit services.
 
 ## Overview
 

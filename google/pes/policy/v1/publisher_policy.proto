@@ -23,9 +23,12 @@ option java_outer_classname = "PublisherPolicyProto";
 option java_package = "com.google.pes.policy.v1";
 
 message PublisherPolicy {
-  string iam_role_arn = 1;
-
-  string publisher_id = 2;
-
+  string publisher_id = 1;
+  repeated OidcTokenClaims oidc_token_claims = 2;
   repeated google.pes.v1.VerificationMaterial verification_material = 3;
+}
+
+message OidcTokenClaims {
+  string issuer = 1;
+  string subject = 2;
 }
