@@ -87,7 +87,7 @@ message Signature {
   VerificationMaterial verification_material = 2 [(google.api.field_behavior) = REQUIRED];
 
   // RFC 3161 timestamp token from the timestamp authority certifying the signature creation time.
-  TimeStampToken time_stamp_token = 3 [(google.api.field_behavior) = OUTPUT_ONLY];
+  repeated TimeStampToken time_stamp_token = 3 [(google.api.field_behavior) = OUTPUT_ONLY];
 }
 
 // Represents an RFC 3161 TimeStampToken.
