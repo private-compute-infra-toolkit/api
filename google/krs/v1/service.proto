@@ -1,0 +1,161 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package google.krs.v1;
+
+import "google/api/annotations.proto";
+import "google/api/field_behavior.proto";
+import "google/krs/v1/public_key.proto";
+
+option java_multiple_files = true;
+option java_outer_classname = "KeyRecoveryServiceProto";
+option java_package = "com.google.krs.v1";
+
+// Key Recovery Service (KRS) running inside an AWS Nitro Enclave.
+// Manages KMS-sealed HPKE wrapping keys and unwraps client-wrapped secrets
+// for attested workloads satisfying the secret's AEAD-bound `ReleasePolicy`.
+service KeyRecoveryService {
+  // Returns KRS's active PRIMARY wrapping key (and optionally retained
+  // DECRYPT_ONLY historical keys) along with its `WrappingKeyEndorsement`.
+  rpc GetPublicKey(GetPublicKeyRequest) returns (GetPublicKeyResponse) {
+    option (google.api.http) = {get: "/v1/publicKey"};
+  }
+
+  // Unwraps a client-wrapped secret for an attested caller that satisfies the
+  // `ReleasePolicy` bound into `serialized_aad_context`.
+  rpc UnwrapKey(UnwrapKeyRequest) returns (UnwrapKeyResponse) {
+    option (google.api.http) = {
+      post: "/v1/keys:unwrap"
+      body: "*"
+    };
+  }
+
+  // Rotates a ciphertext wrapped under an older KRS key version to the current
+  // PRIMARY KRS wrapping key while preserving the exact `ReleasePolicy`.
+  // Does not require the caller to satisfy the `ReleasePolicy` (can be called
+  // by an untrusted background batch job).
+  rpc RewrapKey(RewrapKeyRequest) returns (RewrapKeyResponse) {
+    option (google.api.http) = {
+      post: "/v1/keys:rewrap"
+      body: "*"
+    };
+  }
+}
+
+message GetPublicKeyRequest {
+  // Optional. Specific `key_id` to retrieve. If empty, returns the current
+  // `PRIMARY` wrapping key (plus any active `DECRYPT_ONLY` keys in
+  // `historical_keys`).
+  string key_id = 1 [(google.api.field_behavior) = OPTIONAL];
+}
+
+message GetPublicKeyResponse {
+  // Output only. The current `PRIMARY` wrapping key (or the requested `key_id`).
+  HpkePublicKey primary_key = 1 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // Output only. Retained `DECRYPT_ONLY` wrapping keys still accepted by
+  // `UnwrapKey` and `RewrapKey`.
+  repeated HpkePublicKey historical_keys = 2 [(google.api.field_behavior) = OUTPUT_ONLY];
+}
+
+message UnwrapKeyRequest {
+  // Required. HPKE ciphertext (`enc || ct`) produced offline by the client via:
+  // `HPKE.Seal(pk_KRS, info = "google.krs.v1.wrap", aad = serialized_aad_context, pt = secret)`
+  bytes wrapped_key = 1 [(google.api.field_behavior) = REQUIRED];
+
+  // Required. Exact deterministic serialization of `WrapAadContext` bound at
+  // wrap time. KRS parses `release_policy` from these bytes, verifies the
+  // caller against `release_policy`, and passes these exact bytes as `aad` to
+  // `HPKE.Open`.
+  bytes serialized_aad_context = 2 [(google.api.field_behavior) = REQUIRED];
+
+  // Required in unary mode. Single-use ephemeral HPKE public key (e.g.,
+  // `DHKEM_X25519_HKDF_SHA256`) generated in the calling enclave's RAM to which
+  // KRS seals the unwrapped secret. Kept separate from the leaf certificate's
+  // public key because TCA/AVS leaf certificates certify signing/TLS keys (RSA
+  // or ECDSA) rather than X25519 KEM keys, and a per-request ephemeral key
+  // provides cryptographic key separation and forward secrecy.
+  bytes caller_ephemeral_hpke_public_key = 3 [(google.api.field_behavior) = REQUIRED];
+
+  // Required in unary mode. Signature produced by the private key corresponding
+  // to `caller_credential` over the canonical Pre-Authentication Encoding (PAE)
+  // of `("KRS_UNWRAP_REQUEST_V1", wrapped_key, serialized_aad_context,
+  // caller_ephemeral_hpke_public_key)`.
+  bytes caller_signature = 4 [(google.api.field_behavior) = REQUIRED];
+
+  // Required in unary mode (optional if authenticated via E2E mTLS peer cert).
+  // Cryptographic proof of the calling enclave's identity.
+  CallerCredential caller_credential = 5 [(google.api.field_behavior) = OPTIONAL];
+}
+
+// Attested credential presented by the calling enclave during `UnwrapKey`.
+message CallerCredential {
+  // Ordered DER-encoded X.509 certificate chain (leaf first, root last), e.g.:
+  // `[Workload Leaf, AVS Sub-CA, TCA Root]` or `[Workload Leaf, TCA Root]`.
+  message CertificateChain {
+    repeated bytes certificates = 1 [(google.api.field_behavior) = REQUIRED];
+  }
+
+  oneof credential {
+    // X.509 certificate chain rooted in TCA (issued directly by TCA or via an
+    // intermediate CA such as AVS).
+    CertificateChain tca_certificate_chain = 1;
+
+    // TODO: Add credential variants for endorsed public keys
+    // (`oak.attestation.v1.SignedEndorsement`) or raw attestation evidence
+    // (`google.tca.v1.AttestationEvidence`) if KRS supports direct attestation
+    // verification.
+  }
+}
+
+message UnwrapKeyResponse {
+  // Output only. The unwrapped secret re-encrypted to
+  // `caller_ephemeral_hpke_public_key`:
+  // `HPKE.Seal(caller_ephemeral_hpke_public_key, info = "google.krs.v1.unwrap", aad = serialized_aad_context, pt = secret)`
+  bytes hpke_encrypted_secret = 1 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // Output only. The `HpkePublicKey.key_id` that was used to open `wrapped_key`.
+  string used_wrapping_key_id = 2 [(google.api.field_behavior) = OUTPUT_ONLY];
+}
+
+message RewrapKeyRequest {
+  // Required. Existing HPKE ciphertext wrapped under a `DECRYPT_ONLY` (or
+  // older) KRS wrapping key.
+  bytes old_wrapped_key = 1 [(google.api.field_behavior) = REQUIRED];
+
+  // Required. Exact `serialized_aad_context` bytes bound into `old_wrapped_key`
+  // at wrap time.
+  bytes serialized_aad_context = 2 [(google.api.field_behavior) = REQUIRED];
+
+  // Optional. Target `HpkePublicKey.key_id` to re-wrap under. If empty, KRS
+  // re-wraps under the current `PRIMARY` wrapping key.
+  string target_wrapping_key_id = 3 [(google.api.field_behavior) = OPTIONAL];
+}
+
+message RewrapKeyResponse {
+  // Output only. New HPKE ciphertext sealed under `target_wrapping_key_id` with
+  // `aad = updated_serialized_aad_context`.
+  bytes new_wrapped_key = 1 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // Output only. Deterministic serialization of `WrapAadContext` identical to
+  // the input `serialized_aad_context` except with `wrapping_key_id` updated to
+  // `target_wrapping_key_id`.
+  bytes updated_serialized_aad_context = 2 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // Output only. The `HpkePublicKey.key_id` under which `new_wrapped_key` is
+  // now sealed.
+  string target_wrapping_key_id = 3 [(google.api.field_behavior) = OUTPUT_ONLY];
+}

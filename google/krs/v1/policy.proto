@@ -1,0 +1,130 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package google.krs.v1;
+
+import "google/api/field_behavior.proto";
+
+option java_multiple_files = true;
+option java_outer_classname = "PolicyProto";
+option java_package = "com.google.krs.v1";
+
+// Specifies which attested workload identities are permitted by KRS to unwrap
+// a secret. At least one identity rule must be populated; a caller is
+// authorized if it satisfies any configured rule in `allowed_identities`.
+message ReleasePolicy {
+  repeated AllowedIdentity allowed_identities = 1 [(google.api.field_behavior) = REQUIRED];
+}
+
+// A single authorization rule matching one of the supported caller identity
+// verification methods.
+message AllowedIdentity {
+  // Matches a caller presenting an X.509 certificate chain rooted in TCA
+  // (`CallerCredential.tca_certificate_chain`), issued either directly by TCA
+  // or via an intermediate CA such as AVS.
+  message TcaCertificateMatcher {
+    // Matches parsed components of a PCIT SPIFFE URI in the caller's leaf
+    // certificate URI Subject Alternative Name:
+    // `spiffe://{trust_domain}/operator/{operator_domain}/{operator_role}/publisher/{publisher_id}/workload/{workload_id}`
+    //
+    // All non-empty fields must match the corresponding segments of the
+    // caller's SPIFFE URI (AND semantics; empty optional fields match any
+    // value).
+    message SpiffeAttributes {
+      // Required. Publisher identifier segment following `/publisher/` (e.g.,
+      // `"google.com/my-publisher"` or `"publisher@example.com"`).
+      string publisher_id = 1 [(google.api.field_behavior) = REQUIRED];
+
+      // Required. Workload identifier segment following `/workload/`.
+      string workload_id = 2 [(google.api.field_behavior) = REQUIRED];
+
+      // Optional. Operator domain segment following `/operator/`.
+      string operator_domain = 3 [(google.api.field_behavior) = OPTIONAL];
+
+      // Optional. Operator role segment following `/operator/{operator_domain}/`.
+      string operator_role = 4 [(google.api.field_behavior) = OPTIONAL];
+    }
+
+    // A single SPIFFE identity matching rule.
+    message SpiffeRule {
+      oneof rule {
+        // Exact URI Subject Alternative Name match (e.g.,
+        // `"spiffe://prod.google.com.tca.pcit.goog/operator/prod.google.com/ez/publisher/example.com/ads/workload/my-enclave"`).
+        string spiffe_id = 1;
+
+        // Structured match on parsed PCIT SPIFFE URI segments (for example,
+        // authorizing a `{publisher_id, workload_id}` across any trust domain
+        // or operator role).
+        SpiffeAttributes spiffe_attributes = 2;
+      }
+    }
+
+    // Required. At least one rule must be specified; a caller matches if its
+    // leaf certificate URI Subject Alternative Name satisfies any entry in
+    // `rules` (OR semantics).
+    repeated SpiffeRule rules = 1 [(google.api.field_behavior) = REQUIRED];
+
+    // Optional. DER-encoded X.509 root certificate to use as the trust anchor
+    // when verifying `CallerCredential.tca_certificate_chain`.
+    // If empty, KRS verifies the chain against its default configured TCA root
+    // certificates. Specifying an explicit root certificate allows clients to
+    // pin a specific TCA root epoch or supply a custom root CA in tests.
+    bytes tca_root_certificate = 2 [(google.api.field_behavior) = OPTIONAL];
+  }
+
+  oneof identity_rule {
+    TcaCertificateMatcher tca_certificate = 1;
+
+    // TODO: Add matchers that require attestation or endorsement verification
+    // in KRS (e.g., `EndorsedIdentityMatcher` using Oak
+    // `EndorsementReferenceValue` / transparency log inclusion proofs, or
+    // `AttestationReferenceMatcher` using Oak `ReferenceValues`).
+  }
+}
+
+// Canonical context structure whose deterministic Protobuf serialization
+// (`serialized_aad_context`) is passed as the HPKE `aad` parameter during
+// client-side `WrapKey`, KRS-side `UnwrapKey`, and KRS-side `RewrapKey`.
+//
+// Because `serialized_aad_context` is folded into the AES-256-GCM tag of the
+// HPKE ciphertext, any modification to `release_policy` after wrapping causes
+// `HPKE.Open` inside KRS to fail cryptographically.
+message WrapAadContext {
+  // Schema version for forward compatibility. Must be set to `1`.
+  int32 format_version = 1 [(google.api.field_behavior) = REQUIRED];
+
+  // The `HpkePublicKey.key_id` under which the secret is wrapped.
+  string wrapping_key_id = 2 [(google.api.field_behavior) = REQUIRED];
+
+  // Authorization policy governing which workloads may unwrap the secret.
+  ReleasePolicy release_policy = 3 [(google.api.field_behavior) = REQUIRED];
+
+  // Optional client-defined key identifier or public key digest for auditing
+  // and ciphertext-substitution defense. KRS treats the wrapped secret itself
+  // as opaque bytes (symmetric key, asymmetric private key, PRNG seed, etc.).
+  bytes client_key_context = 4 [(google.api.field_behavior) = OPTIONAL];
+}
+
+// Convenience persistence record that clients can store in cold storage
+// (e.g., Spanner, CNS, S3, or Piper).
+message WrappedKeyRecord {
+  // HPKE ciphertext (`enc || ct`) produced via:
+  // `HPKE.Seal(pk_KRS, info = "google.krs.v1.wrap", aad = serialized_aad_context, pt = secret)`
+  bytes wrapped_key = 1 [(google.api.field_behavior) = REQUIRED];
+
+  // Exact deterministic serialization of `WrapAadContext` bound as HPKE `aad`.
+  bytes serialized_aad_context = 2 [(google.api.field_behavior) = REQUIRED];
+}

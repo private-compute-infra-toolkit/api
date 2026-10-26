@@ -1,0 +1,133 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package google.krs.v1;
+
+import "google/api/field_behavior.proto";
+import "google/protobuf/timestamp.proto";
+import "proto/attestation/endorsement.proto";
+
+option java_multiple_files = true;
+option java_outer_classname = "PublicKeyProto";
+option java_package = "com.google.krs.v1";
+
+// Represents a versioned RFC 9180 HPKE wrapping key generated inside a KRS
+// Nitro Enclave and backed by AWS KMS + Measurement-Bound Storage (MBS).
+//
+// All KRS enclave replicas in a deployment environment share the same active
+// `PRIMARY` wrapping key (sealed in MBS under an AWS KMS policy bound to the
+// KRS enclave's `PCR0` measurement).
+message HpkePublicKey {
+  // Lifecycle state of a KRS wrapping key version.
+  enum KeyState {
+    KEY_STATE_UNSPECIFIED = 0;
+    // Current active key advertised to clients for wrapping new secrets and
+    // used as the target key for `RewrapKey`.
+    PRIMARY = 1;
+    // Retained historical key version usable as the source key in `UnwrapKey`
+    // and `RewrapKey`, but no longer used for new wraps.
+    DECRYPT_ONLY = 2;
+  }
+
+  // Output only. Unique identifier for this wrapping key version (lowercase
+  // hex-encoded first 16 bytes of `SHA-256(hpke_params.raw_public_key)`).
+  string key_id = 1 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // Output only. Current lifecycle state of this key version.
+  KeyState state = 2 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // Output only. RFC 9180 HPKE algorithm parameters and raw public key bytes.
+  HpkeParams hpke_params = 3 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // Output only. Cryptographic endorsements proving that this wrapping key was
+  // generated inside an attested KRS enclave binary and is safe for clients to
+  // wrap secrets under.
+  WrappingKeyEndorsement key_endorsement = 4 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // Output only. Timestamp when this wrapping key version was generated.
+  google.protobuf.Timestamp create_time = 5 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // Output only. Timestamp after which this key version will no longer be
+  // accepted for `UnwrapKey` or `RewrapKey`.
+  google.protobuf.Timestamp expire_time = 6 [(google.api.field_behavior) = OUTPUT_ONLY];
+}
+
+// RFC 9180 Hybrid Public Key Encryption (HPKE) parameters.
+message HpkeParams {
+  // HPKE Key Encapsulation Mechanism (RFC 9180 Section 7.1).
+  enum Kem {
+    KEM_UNSPECIFIED = 0;
+    // DHKEM(X25519, HKDF-SHA256), RFC 9180 KEM ID 0x0020.
+    DHKEM_X25519_HKDF_SHA256 = 1;
+    // DHKEM(P-256, HKDF-SHA256), RFC 9180 KEM ID 0x0010.
+    DHKEM_P256_HKDF_SHA256 = 2;
+  }
+
+  // HPKE Key Derivation Function (RFC 9180 Section 7.2).
+  enum Kdf {
+    KDF_UNSPECIFIED = 0;
+    // HKDF-SHA256, RFC 9180 KDF ID 0x0001.
+    HKDF_SHA256 = 1;
+  }
+
+  // HPKE Authenticated Encryption with Associated Data (RFC 9180 Section 7.3).
+  enum Aead {
+    AEAD_UNSPECIFIED = 0;
+    // AES-256-GCM, RFC 9180 AEAD ID 0x0002.
+    AES_256_GCM = 1;
+  }
+
+  Kem kem = 1 [(google.api.field_behavior) = OUTPUT_ONLY];
+  Kdf kdf = 2 [(google.api.field_behavior) = OUTPUT_ONLY];
+  Aead aead = 3 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // Raw public key bytes (`SerializePublicKey(pk_KRS)` per RFC 9180:
+  // 32 bytes for X25519, or 65-byte uncompressed point `0x04 || X || Y` for
+  // P-256).
+  bytes raw_public_key = 4 [(google.api.field_behavior) = OUTPUT_ONLY];
+}
+
+// Proves the authenticity of the service-wide `HpkePublicKey` (not a specific
+// transient replica instance).
+//
+// When a KRS wrapping key version is generated, the generating KRS enclave
+// obtains a TCA certificate and/or a `SignedEndorsement` (with PES
+// confirmation and/or T-Log inclusion proof) over `hpke_params.raw_public_key`.
+// Clients can verify whichever endorsement channel matches their trust anchors.
+message WrappingKeyEndorsement {
+  // Channel 1 -- TCA X.509 Certificate Chain:
+  // Ordered DER-encoded X.509 chain `[KRS Key Cert, TCA Root Cert]` issued by
+  // TCA (`IssueCertificate`) after verifying the generating KRS enclave's AWS
+  // Nitro attestation and PES binary endorsement.
+  repeated bytes tca_certificate_chain = 1;
+
+  // Channel 2 -- Signed Endorsement & T-Log Inclusion Proof:
+  // Universal Oak `SignedEndorsement` over an in-toto statement binding
+  // `hpke_params.raw_public_key`. Can carry any combination of:
+  //   - `signature`: Endorser/publisher signature over the key statement,
+  //   - `c2sp_tlog_proof`: C2SP `tlog-proof` inclusion proof (e.g. TesserOak /
+  //     TLedger),
+  //   - `pes_confirmation`: Public Endorsement Service (PES) confirmation,
+  //   - `rekor_log_entry`: Rekor transparency log entry.
+  oak.attestation.v1.SignedEndorsement signed_endorsement = 2;
+
+  // Optional Audit Artifact: Raw AWS Nitro Attestation Document (`COSE_Sign1`)
+  // from the key-generating KRS enclave whose `public_key` / `user_data` binds
+  // `hpke_params.raw_public_key` to the KRS enclave's `PCR0`, paired with the
+  // `SignedEndorsement` of that `PCR0` binary measurement.
+  bytes nitro_attestation_doc = 3;
+  oak.attestation.v1.SignedEndorsement binary_endorsement = 4;
+}
